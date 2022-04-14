@@ -1518,7 +1518,76 @@ class ExpressionModel(Model):
 
         """
 
+def exp_dec(x, DP, tau, Pf):
+    """
+    fitting function
 
+    parameters:
+    x: indipendent variable
+    DP, tau, Pf: fitting parameters
+    """
+    return DP * np.exp(-x / tau) + Pf
+
+#####  
+  
+class exp_dec_model(Model):
+    r"""A model based on a exp_dec function.
+
+    The model has three Parameters: `Delta P` (:math:`DP`),  `tau`
+    (:math:`tau`),  `P final` (:math:`Pf`)and  and is defined as:
+
+    .. math::
+
+        f(x; DP, tau, Pf) = DP * np.exp(-x / tau) + Pf
+
+    """
+
+    def __init__(self, independent_vars=["x"], prefix="", nan_policy="raise", **kwargs):
+        kwargs.update(
+            {
+                "prefix": prefix,
+                "nan_policy": nan_policy,
+                "independent_vars": independent_vars,
+            }
+        )
+        super().__init__(exp_dec, **kwargs)
+        self.guess()
+
+    def guess(self, data=None, x=None, **kwargs):
+        """Estimate initial model parameter values from data or sets minimal constrains     
+        on parameters.
+        
+        The guess method is the main reason to have a specific model subclass for a specific
+        expression. If the model is used to describe data from a physical process and the
+        expression is a physical model describing the process it is often possible to set
+        parameter constrains even before knowing which data we are going to fit.
+        
+        Calling the guess method without parameters just sets the minimap constrains on the
+        parameters. This is important since for example composite models do not inherit the guess
+        method.
+        
+        If data and x values are passed, the initial value of each parameter is set based on
+        the best estimate we can do with mathematical operations on the data.
+        """
+        if data is not None and x is not None:
+            Pf_init = np.mean(np.array(data[-1:]))
+            DP_init = np.mean(np.array(data[:1])) - Pf_init
+            tau_init = max(x[data > DP_init / np.exp(1) + Pf_init])
+        else:
+            Pf_init = 1
+            DP_init = 1
+            tau_init = 1
+
+        self.set_param_hint("DP", min=0, max=np.inf, value=DP_init, vary=True)
+        self.set_param_hint("tau", min=0, max=np.inf, value=tau_init, vary=True)
+        self.set_param_hint("Pf", min=0, max=np.inf, value=Pf_init, vary=True) 
+        
+        return self.make_params()
+    
+    __init__.__doc__ = COMMON_INIT_DOC
+    guess.__doc__ = COMMON_GUESS_DOC
+    
+    
 lmfit_models = {'Constant': ConstantModel,
                 'Complex Constant': ComplexConstantModel,
                 'Linear': LinearModel,
@@ -1546,4 +1615,5 @@ lmfit_models = {'Constant': ConstantModel,
                 'Exponential': ExponentialModel,
                 'Step': StepModel,
                 'Rectangle': RectangleModel,
-                'Expression': ExpressionModel}
+                'Expression': ExpressionModel,
+                'Exp_dec':exp_dec_model}
