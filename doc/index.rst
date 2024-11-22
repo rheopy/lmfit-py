@@ -1,4 +1,4 @@
-.. lmfit documentation master file,
+.. lmfit documentation master file
 
 Non-Linear Least-Squares Minimization and Curve-Fitting for Python
 ==================================================================
@@ -48,7 +48,6 @@ The lmfit package is Free software, using an Open Source license. The
 software and this document are works in progress. If you are interested in
 participating in this effort please use the `lmfit GitHub repository`_.
 
-
 .. toctree::
    :maxdepth: 2
 
@@ -64,4 +63,4 @@ participating in this effort please use the `lmfit GitHub repository`_.
    bounds
    constraints
    whatsnew
-   examples/index
+   examples/index.rst

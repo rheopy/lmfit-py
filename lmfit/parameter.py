@@ -5,13 +5,18 @@ import json
 
 from asteval import Interpreter, get_ast_names, valid_symbol_name
 from numpy import arcsin, array, cos, inf, isclose, sin, sqrt
+from scipy.linalg import LinAlgError
 import scipy.special
+from uncertainties import correlated_values, ufloat
+from uncertainties import wrap as uwrap
 
 from .jsonutils import decode4js, encode4js
 from .lineshapes import tiny
 from .printfuncs import params_html_table
 
-SCIPY_FUNCTIONS = {'gamfcn': scipy.special.gamma}
+SCIPY_FUNCTIONS = {'gamfcn': scipy.special.gamma,
+                   'loggammafcn': scipy.special.loggamma,
+                   'betalnfnc': scipy.special.betaln}
 for fnc_name in ('erf', 'erfc', 'wofz'):
     SCIPY_FUNCTIONS[fnc_name] = getattr(scipy.special, fnc_name)
 
@@ -20,6 +25,37 @@ def check_ast_errors(expr_eval):
     """Check for errors derived from asteval."""
     if len(expr_eval.error) > 0:
         expr_eval.raise_exception(None)
+
+
+class Writer:
+    """Replace 'stdout' and 'stderr' for asteval."""
+    def __init__(self, **kws):
+        self.messages = []
+        for k, v in kws.items():
+            setattr(self, k, v)
+
+    def write(self, msg):
+        """Internal writer."""
+        o = msg.strip()
+        if len(o) > 0:
+            self.messages.append(msg)
+
+
+def asteval_with_uncertainties(*vals, obj=None, pars=None, names=None, **kwargs):
+    """Calculate object value, given values for variables.
+
+    This is used by the uncertainties package to calculate the
+    uncertainty in an object even with a complicated expression.
+    """
+    _asteval = getattr(pars, '_asteval', None)
+    if obj is None or pars is None or names is None or _asteval is None:
+        return 0
+    for val, name in zip(vals, names):
+        _asteval.symtable[name] = val
+
+    # re-evaluate constraint parameters topropagate uncertainties
+    [p._getval() for p in pars.values()]
+    return _asteval.eval(obj._expr_ast)
 
 
 class Parameters(dict):
@@ -36,7 +72,7 @@ class Parameters(dict):
 
     All values of a Parameters() instance must be Parameter objects.
 
-    A Parameters() instance includes an `asteval` Interpreter used for
+    A Parameters(xs) instance includes an `asteval` Interpreter used for
     evaluation of constrained Parameters.
 
     Parameters() support copying and pickling, and have methods to convert
@@ -54,8 +90,9 @@ class Parameters(dict):
 
         """
         super().__init__(self)
-
-        self._asteval = Interpreter()
+        self._ast_msgs = Writer()
+        self._asteval = Interpreter(writer=self._ast_msgs,
+                                    err_writer=self._ast_msgs)
 
         _syms = {}
         _syms.update(SCIPY_FUNCTIONS)
@@ -63,6 +100,9 @@ class Parameters(dict):
             _syms.update(usersyms)
         for key, val in _syms.items():
             self._asteval.symtable[key] = val
+
+    def _writer(self, msg):
+        self._asteval_msgs.append(msg)
 
     def copy(self):
         """Parameters.copy() should always be a deepcopy."""
@@ -91,8 +131,14 @@ class Parameters(dict):
         _pars = self.__class__()
 
         # find the symbols that were added by users, not during construction
-        unique_symbols = {key: self._asteval.symtable[key]
-                          for key in self._asteval.user_defined_symbols()}
+        unique_symbols = {}
+        for key in self._asteval.user_defined_symbols():
+            try:
+                val = deepcopy(self._asteval.symtable[key])
+                unique_symbols[key] = val
+            except (TypeError, ValueError):
+                unique_symbols[key] = self._asteval.symtable[key]
+
         _pars._asteval.symtable.update(unique_symbols)
 
         # we're just about to add a lot of Parameter objects to the newly
@@ -106,10 +152,10 @@ class Parameters(dict):
                 param.vary = par.vary
                 param.brute_step = par.brute_step
                 param.stderr = par.stderr
-                param.correl = par.correl
+                param.correl = deepcopy(par.correl)
                 param.init_value = par.init_value
                 param.expr = par.expr
-                param.user_data = par.user_data
+                param.user_data = deepcopy(par.user_data)
                 parameter_list.append(param)
 
         _pars.add_many(*parameter_list)
@@ -153,9 +199,8 @@ class Parameters(dict):
         params = [self[k] for k in self]
 
         # find the symbols from _asteval.symtable, that need to be remembered.
-        sym_unique = self._asteval.user_defined_symbols()
         unique_symbols = {key: deepcopy(self._asteval.symtable[key])
-                          for key in sym_unique}
+                          for key in self._asteval.user_defined_symbols()}
 
         return self.__class__, (), {'unique_symbols': unique_symbols,
                                     'params': params}
@@ -272,14 +317,11 @@ class Parameters(dict):
         Parameters
         ----------
         oneline : bool, optional
-            If True prints a one-line parameters representation (default
-            is False).
+            If True prints a one-line parameters representation [False]
         colwidth : int, optional
-            Column width for all columns specified in `columns` (default
-            is 8).
+            Column width for all columns specified in `columns` [8]
         precision : int, optional
-            Number of digits to be printed after floating point (default
-            is 4).
+            Number of digits to be printed after floating point [4]
         fmt : {'g', 'e', 'f'}, optional
             Single-character numeric formatter. Valid values are: `'g'`
             floating point and exponential (default), `'e'` exponential,
@@ -318,6 +360,49 @@ class Parameters(dict):
     def _repr_html_(self):
         """Return a HTML representation of parameters data."""
         return params_html_table(self)
+
+    def set(self, **kws):
+        """Set Parameter values and other attributes.
+
+        Parameters
+        ----------
+        **kws : optional
+            Parameter names and initial values or dictionaries of
+                 values and attributes.
+
+        Returns
+        -------
+        None
+
+        Notes
+        -----
+        1. keyword arguments will be used to create parameter names.
+        2. values can either be numbers (floats or integers) to set the
+           parameter value, or can be dictionaries with any of the following
+           keywords: ``value``, ``vary``, ``min``, ``max``, ``expr``,
+           ``brute_step``, or ``is_init_value`` to set those parameter attributes.
+        3. for each parameter,  ``is_init_value`` controls whether to set
+           ``init_value`` when setting ``value``, and defaults to True.
+
+        Examples
+        --------
+        >>> params = Parameters()
+        >>> params.add('xvar', value=0.50, min=0, max=1)
+        >>> params.add('yvar', expr='1.0 - xvar')
+        >>> params.set(xvar=0.80, zvar={'value':3, 'min':0})
+
+        """
+        for name, val in kws.items():
+            if name not in self:
+                self.__setitem__(name, Parameter(value=-inf, name=name,
+                                                 vary=True, min=-inf, max=inf,
+                                                 expr=None, brute_step=None))
+            par = self.__getitem__(name)
+            if isinstance(val, (float, int)):
+                val = {'value': val}
+            if 'is_init_value' not in val:
+                val['is_init_value'] = True
+            par.set(**val)
 
     def add(self, name, value=None, vary=True, min=-inf, max=inf, expr=None,
             brute_step=None):
@@ -366,6 +451,9 @@ class Parameters(dict):
             self.__setitem__(name, Parameter(value=value, name=name, vary=vary,
                                              min=min, max=max, expr=expr,
                                              brute_step=brute_step))
+        if len(self._asteval.error) > 0:
+            err = self._asteval.error[0]
+            raise err.exc(err.msg)
 
     def add_many(self, *parlist):
         """Add many parameters, using a sequence of tuples.
@@ -415,6 +503,74 @@ class Parameters(dict):
         """
         return {p.name: p.value for p in self.values()}
 
+    def create_uvars(self, covar=None):
+        """Return a dict of uncertainties ufloats from the current Parameter
+        values and stderr, and an optionally-supplied covariance matrix.
+        Uncertainties in Parameters with constraint expressions will be
+        calculated, propagating uncertaintes (and including correlations)
+
+        Parameters
+        ----------
+        covar : optional
+              Nvar x Nvar covariance matrix from fit
+
+        Returns
+        -------
+        dict with keys of Parameter names and values of uncertainties.ufloats.
+
+        Notes
+        -----
+        1.  if covar is provide, it must correspond to the existing *variable*
+            Parameters.  If covar is given, the returned uncertainties ufloats
+            will take the correlations into account when combining values.
+        2.  See the uncertainties package documentation
+            (https://pythonhosted.org/uncertainties) for more details.
+        """
+        uvars = {}
+        has_expr = False
+        vnames, vbest, vindex = [], [], -1
+        savevals = self.valuesdict()
+        for par in self.values():
+            has_expr = has_expr or par.expr is not None
+            if par.vary:
+                vindex += 1
+                vnames.append(par.name)
+                vbest.append(par.value)
+                if getattr(par, 'stderr', None) is None and covar is not None:
+                    par.stderr = sqrt(covar[vindex, vindex])
+            stderr = getattr(par, 'stderr', 0.0)
+            if stderr is None:
+                stderr = 0.0
+            uvars[par.name] = ufloat(par.value, stderr)
+
+        corr_uvars = None
+        if covar is not None:
+            try:
+                corr_uvars = correlated_values(vbest, covar)
+                for name, cuv in zip(vnames, corr_uvars):
+                    uvars[name] = cuv
+            except (LinAlgError, ValueError):
+                pass
+
+        if has_expr and corr_uvars is not None:
+            # for uncertainties on constrained parameters, use the calculated
+            # correlated values, evaluate the uncertainties on the constrained
+            # parameters and reset the Parameters to best-fit value
+            wrap_ueval = uwrap(asteval_with_uncertainties)
+            for par in self.values():
+                if getattr(par, '_expr_ast', None) is not None:
+                    try:
+                        uval = wrap_ueval(*corr_uvars, obj=par,
+                                          pars=self, names=vnames)
+                        par.stderr = uval.std_dev
+                        uvars[par.name] = uval
+                    except Exception:
+                        par.stderr = 0
+        # restore all param values to saved best values
+        for parname, param in self.items():
+            param.value = savevals[parname]
+        return uvars
+
     def dumps(self, **kws):
         """Represent Parameters as a JSON string.
 
@@ -434,9 +590,8 @@ class Parameters(dict):
 
         """
         params = [p.__getstate__() for p in self.values()]
-        sym_unique = self._asteval.user_defined_symbols()
         unique_symbols = {key: encode4js(deepcopy(self._asteval.symtable[key]))
-                          for key in sym_unique}
+                          for key in self._asteval.user_defined_symbols()}
         return json.dumps({'unique_symbols': unique_symbols,
                            'params': params}, **kws)
 
@@ -590,7 +745,7 @@ class Parameter:
         self.min = min
         self.max = max
         self.brute_step = brute_step
-        self.vary = vary
+        self._vary = vary
         self._expr = expr
         self._expr_ast = None
         self._expr_eval = None
@@ -603,7 +758,7 @@ class Parameter:
         self._init_bounds()
 
     def set(self, value=None, vary=None, min=None, max=None, expr=None,
-            brute_step=None):
+            brute_step=None, is_init_value=True):
         """Set or update Parameter attributes.
 
         Parameters
@@ -624,6 +779,8 @@ class Parameter:
         brute_step : float, optional
             Step size for grid points in the `brute` method. To remove the
             step size you must use ``0``.
+        is_init_value: bool, optional
+            Whether to set value as `init_value`, when setting value.
 
         Notes
         -----
@@ -651,7 +808,7 @@ class Parameter:
 
         """
         if vary is not None:
-            self.vary = vary
+            self._vary = vary
             if vary:
                 self.__set_expression('')
 
@@ -664,7 +821,10 @@ class Parameter:
         # need to set this after min and max, so that it will use new
         # bounds in the setter for value
         if value is not None:
+            is_init_value = is_init_value or self.value in (None, -inf, inf)
             self.value = value
+            if is_init_value:
+                self.init_value = value
             self.__set_expression("")
 
         if expr is not None:
@@ -697,13 +857,13 @@ class Parameter:
 
     def __getstate__(self):
         """Get state for pickle."""
-        return (self.name, self.value, self.vary, self.expr, self.min,
+        return (self.name, self.value, self._vary, self.expr, self.min,
                 self.max, self.brute_step, self.stderr, self.correl,
                 self.init_value, self.user_data)
 
     def __setstate__(self, state):
         """Set state for pickle."""
-        (self.name, _value, self.vary, self.expr, self.min, self.max,
+        (self.name, _value, self._vary, self.expr, self.min, self.max,
          self.brute_step, self.stderr, self.correl, self.init_value,
          self.user_data) = state
         self._expr_ast = None
@@ -718,7 +878,7 @@ class Parameter:
         """Return printable representation of a Parameter object."""
         s = []
         sval = f"value={repr(self._getval())}"
-        if not self.vary and self._expr is None:
+        if not self._vary and self._expr is None:
             sval += " (fixed)"
         elif self.stderr is not None:
             sval += f" +/- {self.stderr:.3g}"
@@ -829,6 +989,18 @@ class Parameter:
             self._expr_eval.symtable[self.name] = self._val
 
     @property
+    def vary(self):
+        """Return whether the parameter is variable"""
+        return self._vary
+
+    @vary.setter
+    def vary(self, val):
+        """Set whether a parameter is varied"""
+        self._vary = val
+        if val:
+            self.__set_expression('')
+
+    @property
     def expr(self):
         """Return the mathematical expression used to constrain the value in fit."""
         return self._expr
@@ -847,7 +1019,7 @@ class Parameter:
             val = None
         self._expr = val
         if val is not None:
-            self.vary = False
+            self._vary = False
         if not hasattr(self, '_expr_eval'):
             self._expr_eval = None
         if val is None:
@@ -982,3 +1154,37 @@ class Parameter:
     def __rsub__(self, other):
         """- (right)"""
         return other - self._getval()
+
+
+def create_params(**kws):
+    """Create lmfit.Parameters instance and set initial values and attributes.
+
+    Parameters
+    ----------
+    **kws
+        keywords are parameter names, value are dictionaries of Parameter
+        values and attributes.
+
+    Returns
+    -------
+    Parameters instance
+
+    Notes
+    -----
+    1. keyword arguments will be used to create parameter names.
+    2. values can either be numbers (floats or integers) to set the parameter
+       value, or can be dictionaries with any of the following keywords:
+       ``value``, ``vary``, ``min``, ``max``, ``expr``, ``brute_step``, or
+       ``is_init_value`` to set those parameter attributes.
+    3. for each parameter,  ``is_init_value`` controls whether to set
+       ``init_value`` when setting ``value``, and defaults to True.
+
+    Examples
+    --------
+    >>> params = create_params(amplitude=2, center=200,
+                               sigma={'value': 3, 'min':0},
+                               fwhm={'expr': '2.0*sigma'})
+    """
+    params = Parameters()
+    params.set(**kws)
+    return params

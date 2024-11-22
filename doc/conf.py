@@ -35,17 +35,17 @@ autoclass_content = 'both'
 
 # shpinx.ext.intersphinx settings
 intersphinx_mapping = {'py': ('https://docs.python.org/3', None),
-                       'numpy': ('https://numpy.org/doc/stable', None),
-                       'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
-                       'matplotlib': ('https://matplotlib.org', None),
+                       'numpy': ('https://numpy.org/doc/stable/', None),
+                       'scipy': ('https://docs.scipy.org/doc/scipy/', None),
+                       'matplotlib': ('https://matplotlib.org/stable/', None),
                        'pandas': ('https://pandas.pydata.org/pandas-docs/stable/', None),
                        'sympy': ('https://docs.sympy.org/latest/', None),
                        }
 
 # shpinx.ext.extlinks settings
 extlinks = {
-    'scipydoc': ('https://docs.scipy.org/doc/scipy/reference/generated/scipy.%s.html', 'scipy.'),
-    'numpydoc': ('https://docs.scipy.org/doc/numpy/reference/generated/numpy.%s.html', 'numpy.'),
+    'scipydoc': ('https://docs.scipy.org/doc/scipy/reference/generated/scipy.%s.html', 'scipy.%s'),
+    'numpydoc': ('https://docs.scipy.org/doc/numpy/reference/generated/numpy.%s.html', 'numpy.%s'),
     }
 
 # sphinx.ext.imgmath settings
@@ -167,7 +167,7 @@ sphinx_gallery_conf = {
     'examples_dirs': '../examples',
     'gallery_dirs': 'examples',
     'filename_pattern': r'(\\|/)documentation|(\\|/)example_',
-    'ignore_pattern': r'(\\|/)doc_',
+    'ignore_pattern': 'doc_',
     'ignore_repr_types': r'matplotlib',
     'image_srcset': ["3x"],
 }

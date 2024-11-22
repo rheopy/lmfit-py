@@ -1,25 +1,25 @@
 """Tests for the Model, CompositeModel, and ModelResult classes."""
 
 import functools
-import sys
 import unittest
 import warnings
 
 import numpy as np
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_almost_equal
 import pytest
+from scipy import __version__ as scipy_version
 
 import lmfit
-from lmfit import Model, models
-from lmfit.lineshapes import gaussian
+from lmfit import Model, Parameters, models
+from lmfit.lineshapes import gaussian, lorentzian, step, voigt
 from lmfit.model import get_reducer, propagate_err
-from lmfit.models import PseudoVoigtModel
+from lmfit.models import GaussianModel, PseudoVoigtModel, QuadraticModel
 
 
 @pytest.fixture()
 def gmodel():
     """Return a Gaussian model."""
-    return Model(lmfit.lineshapes.gaussian)
+    return Model(gaussian)
 
 
 def test_get_reducer_invalid_option():
@@ -127,7 +127,7 @@ def test_initialize_Model_class_default_arguments(gmodel):
 
 def test_initialize_Model_class_independent_vars():
     """Test for Model class initialized with independent_vars."""
-    model = Model(lmfit.lineshapes.gaussian, independent_vars=['amplitude'])
+    model = Model(gaussian, independent_vars=['amplitude'])
     assert model._param_root_names == ['x', 'center', 'sigma']
     assert model.param_names == ['x', 'center', 'sigma']
     assert model.independent_vars == ['amplitude']
@@ -135,7 +135,7 @@ def test_initialize_Model_class_independent_vars():
 
 def test_initialize_Model_class_param_names():
     """Test for Model class initialized with param_names."""
-    model = Model(lmfit.lineshapes.gaussian, param_names=['amplitude'])
+    model = Model(gaussian, param_names=['amplitude'])
 
     assert model._param_root_names == ['amplitude']
     assert model.param_names == ['amplitude']
@@ -144,28 +144,28 @@ def test_initialize_Model_class_param_names():
 @pytest.mark.parametrize("policy", ['raise', 'omit', 'propagate'])
 def test_initialize_Model_class_nan_policy(policy):
     """Test for Model class initialized with nan_policy."""
-    model = Model(lmfit.lineshapes.gaussian, nan_policy=policy)
+    model = Model(gaussian, nan_policy=policy)
 
     assert model.nan_policy == policy
 
 
 def test_initialize_Model_class_prefix():
     """Test for Model class initialized with prefix."""
-    model = Model(lmfit.lineshapes.gaussian, prefix='test_')
+    model = Model(gaussian, prefix='test_')
 
     assert model.prefix == 'test_'
     assert model._param_root_names == ['amplitude', 'center', 'sigma']
     assert model.param_names == ['test_amplitude', 'test_center', 'test_sigma']
     assert model.name == "Model(gaussian, prefix='test_')"
 
-    model = Model(lmfit.lineshapes.gaussian, prefix=None)
+    model = Model(gaussian, prefix=None)
 
     assert model.prefix == ''
 
 
 def test_initialize_Model_name():
     """Test for Model class initialized with name."""
-    model = Model(lmfit.lineshapes.gaussian, name='test_function')
+    model = Model(gaussian, name='test_function')
 
     assert model.name == 'Model(test_function)'
 
@@ -173,7 +173,7 @@ def test_initialize_Model_name():
 def test_initialize_Model_kws():
     """Test for Model class initialized with **kws."""
     kws = {'amplitude': 10.0}
-    model = Model(lmfit.lineshapes.gaussian,
+    model = Model(gaussian,
                   independent_vars=['x', 'amplitude'], **kws)
 
     assert model._param_root_names == ['center', 'sigma']
@@ -190,7 +190,7 @@ test_reprstring_data = [(False, 'Model(gaussian)'),
 def test_Model_reprstring(option, expected):
     """Test for Model class function _reprstring."""
     kws = {'amplitude': 10.0}
-    model = Model(lmfit.lineshapes.gaussian,
+    model = Model(gaussian,
                   independent_vars=['x', 'amplitude'], **kws)
 
     assert model._reprstring(option) == expected
@@ -202,11 +202,22 @@ def test_Model_get_state(gmodel):
 
     assert isinstance(out, tuple)
     assert out[1] == out[2] is None
-    assert (out[0][1] is not None) == lmfit.jsonutils.HAS_DILL
-
-    assert out[0][0] == 'gaussian'
-    assert out[0][2:] == ('gaussian', '', ['x'],
-                          ['amplitude', 'center', 'sigma'], {}, 'raise', {})
+    sstate = out[0]
+    if isinstance(sstate, tuple):  # state version 1
+        assert sstate[1] is not None
+        assert sstate[0] == 'gaussian'
+        assert sstate[2:] == ('gaussian', '', ['x'],
+                              ['amplitude', 'center', 'sigma'], {}, 'raise', {})
+    elif isinstance(sstate, dict) and 'version' in sstate:  # state version 2 or higher
+        if sstate['version'] == '2':
+            assert sstate['funcname'] == 'gaussian'
+            assert sstate['name'] == 'gaussian'
+            assert sstate['independent_vars'] == ['x']
+            assert sstate['param_root_names'] == ['amplitude', 'center', 'sigma']
+        else:
+            assert sstate['version'] == 'unknown version!'
+    else:
+        assert sstate == 'unknown model state'
 
 
 def test_Model_set_state(gmodel):
@@ -218,7 +229,7 @@ def test_Model_set_state(gmodel):
     """
     out = gmodel._get_state()
 
-    new_model = Model(lmfit.lineshapes.lorentzian)
+    new_model = Model(lorentzian)
     new_model = new_model._set_state(out)
 
     assert new_model.prefix == gmodel.prefix
@@ -270,7 +281,7 @@ def test_Model_getter_param_names(gmodel):
 
 def test_Model__repr__(gmodel):
     """Test for Model class __repr__ method."""
-    assert gmodel.__repr__() == '<lmfit.Model: Model(gaussian)>'
+    assert 'Model(gaussian)' in gmodel.__repr__()
 
 
 def test_Model_copy(gmodel):
@@ -339,6 +350,36 @@ def test__parse_params_inspect_signature():
     assert_allclose(mod.def_vals['c'], 10)
 
 
+def test_make_params_withprefixs():
+    # tests Github Issue #893
+    gmod1 = GaussianModel(prefix='p1_')
+    gmod2 = GaussianModel(prefix='p2_')
+
+    model = gmod1 + gmod2
+
+    pars_1a = gmod1.make_params(p1_amplitude=10, p1_center=600, p1_sigma=3)
+    pars_1b = gmod1.make_params(amplitude=10, center=600, sigma=3)
+
+    pars_2a = gmod2.make_params(p2_amplitude=30, p2_center=730, p2_sigma=4)
+    pars_2b = gmod2.make_params(amplitude=30, center=730, sigma=4)
+
+    pars_a = Parameters()
+    pars_a.update(pars_1a)
+    pars_a.update(pars_2a)
+
+    pars_b = Parameters()
+    pars_b.update(pars_1b)
+    pars_b.update(pars_2b)
+
+    pars_c = model.make_params()
+
+    for pname in ('p1_amplitude', 'p1_center', 'p1_sigma',
+                  'p2_amplitude', 'p2_center', 'p2_sigma'):
+        assert pname in pars_a
+        assert pname in pars_b
+        assert pname in pars_c
+
+
 def test__parse_params_forbidden_variable_names():
     """Tests for _parse_params function using invalid variable names."""
 
@@ -357,45 +398,78 @@ def test__parse_params_forbidden_variable_names():
         Model(func_invalid_par)
 
 
-input_dtypes = [(np.int32, np.float64), (np.float32, np.float64),
-                (np.complex64, np.complex128), ('list', np.float64),
-                ('tuple', np.float64), ('pandas-real', np.float64),
-                ('pandas-complex', np.complex128)]
-
-
-@pytest.mark.parametrize('input_dtype, expected_dtype', input_dtypes)
-def test_coercion_of_input_data(peakdata, input_dtype, expected_dtype):
+@pytest.mark.parametrize('input_dtype', (np.int16, np.int32, np.float32,
+                                         np.complex64, np.complex128, 'list',
+                                         'tuple', 'pandas-real',
+                                         'pandas-complex'))
+def test_coercion_of_input_data(peakdata, input_dtype):
     """Test for coercion of 'data' and 'independent_vars'.
 
-    - 'data' should become 'float64' or 'complex128'
-    - dtype for 'indepdendent_vars' is only changed when the input is a list,
-        tuple, numpy.ndarray, or pandas.Series
+    'data' and `independent_vars` should be coerced to 'float64' or 'complex128'
+
+    unless told not be coerced by setting ``coerce_farray=False``.
+
+    # - dtype for 'indepdendent_vars' is only changed when the input is a list,
+    #    tuple, numpy.ndarray, or pandas.Series
 
     """
     x, y = peakdata
-    model = lmfit.Model(gaussian)
-    pars = model.make_params()
 
-    if (not lmfit.minimizer.HAS_PANDAS and input_dtype in ['pandas-real',
-                                                           'pandas-complex']):
-        return
+    def gaussian_lists(x, amplitude=1.0, center=0.0, sigma=1.0):
+        xarr = np.array(x, dtype=np.float64)
+        return ((amplitude/(max(1.e-15, np.sqrt(2*np.pi)*sigma)))
+                * np.exp(-(xarr-center)**2 / max(1.e-15, (2*sigma**2))))
 
-    elif input_dtype == 'pandas-real':
-        result = model.fit(lmfit.model.Series(y, dtype=np.float32), pars,
-                           x=lmfit.model.Series(x, dtype=np.float32))
-    elif input_dtype == 'pandas-complex':
-        result = model.fit(lmfit.model.Series(y, dtype=np.complex64), pars,
-                           x=lmfit.model.Series(x, dtype=np.complex64))
-    elif input_dtype == 'list':
-        result = model.fit(y.tolist(), pars, x=x.tolist())
-    elif input_dtype == 'tuple':
-        result = model.fit(tuple(y), pars, x=tuple(x))
-    else:
-        result = model.fit(np.asarray(y, dtype=input_dtype), pars,
-                           x=np.asarray(x, dtype=input_dtype))
+    for coerce_farray in True, False:
+        if (input_dtype in ('pandas-real', 'pandas-complex')
+           and not lmfit.minimizer.HAS_PANDAS):
+            return
 
-    assert result.__dict__['userkws']['x'].dtype == expected_dtype
-    assert result.__dict__['userargs'][0].dtype == expected_dtype
+        if not coerce_farray and input_dtype in ('list', 'tuple'):
+            model = lmfit.Model(gaussian_lists)
+        else:
+            model = lmfit.Model(gaussian)
+
+        pars = model.make_params(amplitude=5, center=10, sigma=2)
+
+        if input_dtype == 'pandas-real':
+            result = model.fit(lmfit.model.Series(y, dtype=np.float32), pars,
+                               x=lmfit.model.Series(x, dtype=np.float32),
+                               coerce_farray=coerce_farray)
+
+            expected_dtype = np.float64 if coerce_farray else np.float32
+
+        elif input_dtype == 'pandas-complex':
+            result = model.fit(lmfit.model.Series(y, dtype=np.complex64), pars,
+                               x=lmfit.model.Series(x, dtype=np.complex64),
+                               coerce_farray=coerce_farray)
+            expected_dtype = np.complex128 if coerce_farray else np.complex64
+
+        elif input_dtype == 'list':
+            result = model.fit(y.tolist(), pars, x=x.tolist(),
+                               coerce_farray=coerce_farray)
+            expected_dtype = np.float64 if coerce_farray else list
+
+        elif input_dtype == 'tuple':
+            result = model.fit(tuple(y), pars, x=tuple(x),
+                               coerce_farray=coerce_farray)
+            expected_dtype = np.float64 if coerce_farray else tuple
+
+        else:
+            result = model.fit(np.asarray(y, dtype=input_dtype), pars,
+                               x=np.asarray(x, dtype=input_dtype),
+                               coerce_farray=coerce_farray)
+            expected_dtype = np.float64
+            if input_dtype in (np.complex64, np.complex128):
+                expected_dtype = np.complex128
+            expected_dtype = expected_dtype if coerce_farray else input_dtype
+
+        if not coerce_farray and input_dtype in ('list', 'tuple'):
+            assert isinstance(result.userkws['x'], (list, tuple))
+            assert isinstance(result.userargs[0], (list, tuple))
+        else:
+            assert result.userkws['x'].dtype == expected_dtype
+            assert result.userargs[0].dtype == expected_dtype
 
 
 def test_figure_default_title(peakdata):
@@ -486,6 +560,36 @@ def test_priority_setting_figure_title(peakdata):
     assert fig.axes[1].get_title() == ''
 
 
+def test_eval_with_kwargs():
+    # Check eval() with both params and kwargs, even when there are
+    # constraints
+    x = np.linspace(0, 30, 301)
+    np.random.seed(13)
+    y1 = (gaussian(x, amplitude=10, center=12.0, sigma=2.5) +
+          gaussian(x, amplitude=20, center=19.0, sigma=2.5))
+
+    y2 = (gaussian(x, amplitude=10, center=12.0, sigma=1.5) +
+          gaussian(x, amplitude=20, center=19.0, sigma=2.5))
+
+    model = Model(gaussian, prefix='g1_') + Model(gaussian, prefix='g2_')
+    params = model.make_params(g1_amplitude=10, g1_center=12.0, g1_sigma=1,
+                               g2_amplitude=20, g2_center=19.0,
+                               g2_sigma={'expr': 'g1_sigma'})
+
+    r1 = model.eval(params, g1_sigma=2.5, x=x)
+    assert_allclose(r1, y1, atol=1.e-3)
+
+    assert params['g2_sigma'].value == 1
+    assert params['g1_sigma'].value == 1
+
+    params['g1_sigma'].value = 1.5
+    params['g2_sigma'].expr = None
+    params['g2_sigma'].value = 2.5
+
+    r2 = model.eval(params, x=x)
+    assert_allclose(r2, y2, atol=1.e-3)
+
+
 def test_guess_requires_x():
     """Test to make sure that ``guess()`` method requires the argument ``x``.
 
@@ -564,7 +668,7 @@ class CommonTests:
         result = model.fit(self.data, params, x=self.x)
         assert_results_close(result.values, self.true_values())
 
-        # Pass inidividual Parameter objects as kwargs.
+        # Pass individual Parameter objects as kwargs.
         kwargs = dict(params.items())
         result = self.model.fit(self.data, x=self.x, **kwargs)
         assert_results_close(result.values, self.true_values())
@@ -771,7 +875,45 @@ class TestUserDefiniedModel(CommonTests, unittest.TestCase):
     def test_missing_independent_variable_raises_error(self):
         pars = self.model.make_params(**self.guess())
         f = lambda: self.model.fit(self.data, pars)
-        self.assertRaises(KeyError, f)
+        self.assertRaises(ValueError, f)
+
+    def test_independent_var_parsing(self):
+        """test the parsing of independent variables for model functions
+        with keyword arguments
+
+        step:  form='linear'
+        voigt: gamma=None,     can become a variable!!
+        """
+        stepmod1 = Model(step)
+        assert 'x' in stepmod1.independent_vars
+        assert 'form' in stepmod1.independent_vars
+        assert 'linear' == stepmod1.independent_vars_defvals.get('form', None)
+
+        stepmod2 = Model(step, form='arctan')
+        assert 'x' in stepmod2.independent_vars
+        assert 'form' in stepmod2.independent_vars
+        assert 'arctan' == stepmod2.independent_vars_defvals.get('form', None)
+
+        x = np.linspace(0, 30, 301)
+        pars = stepmod1.make_params(amplitude=10, center=14, sigma=2.5)
+        yline = stepmod1.eval(pars, x=x)
+        yatan = stepmod2.eval(pars, x=x)
+
+        assert (yatan-yline).std() > 0.1
+        assert np.ptp(yatan-yline) > 1.0
+
+        voigtmod = Model(voigt)
+        assert 'x' in voigtmod.independent_vars
+        assert 'gamma' in voigtmod.independent_vars
+        assert voigtmod.independent_vars_defvals['gamma'] is None
+
+        pars1 = voigtmod.make_params(amplitude=25, center=9.5, sigma=1)
+        assert 'sigma' in pars1
+        assert 'gamma' not in pars1
+
+        pars2 = voigtmod.make_params(amplitude=25, center=9.5, sigma=1, gamma=0.5)
+        assert 'sigma' in pars2
+        assert 'gamma' in pars2
 
     def test_bounding(self):
         true_values = self.true_values()
@@ -986,6 +1128,10 @@ class TestUserDefiniedModel(CommonTests, unittest.TestCase):
     def test_composite_plotting(self):
         # test that a composite model has non-empty best_values
         import matplotlib
+        try:
+            matplotlib.pyplot.close('all')
+        except ValueError:
+            pass
         matplotlib.use('Agg')
 
         model1 = models.GaussianModel(prefix='g1_')
@@ -1047,7 +1193,7 @@ class TestUserDefiniedModel(CommonTests, unittest.TestCase):
         _m = m1 + m2  # noqa: F841
 
         param_values = {name: p.value for name, p in params.items()}
-        self.assertTrue(param_values['m1_intercept'] < -0.0)
+        assert_almost_equal(param_values['m1_intercept'], 0.)
         self.assertEqual(param_values['m2_amplitude'], 1)
 
     def test_weird_param_hints(self):
@@ -1184,12 +1330,19 @@ class TestUserDefiniedModel(CommonTests, unittest.TestCase):
 
         # with propagate, should get no error, but bad results
         result = mod.fit(y, params, x=x, nan_policy='propagate')
-        self.assertTrue(result.success)
-        self.assertTrue(np.isnan(result.chisqr))
-        self.assertTrue(np.isnan(result.aic))
-        self.assertFalse(result.errorbars)
-        self.assertTrue(result.params['amplitude'].stderr is None)
-        self.assertTrue(abs(result.params['amplitude'].value - 20.0) < 0.001)
+
+        # for SciPy v1.10+ this results in an AbortFitException, even with
+        # `max_nfev=100000`:
+        #   lmfit.minimizer.AbortFitException: fit aborted: too many function
+        #   evaluations xxxxx
+        if int(scipy_version.split('.')[1]) < 10:
+            self.assertTrue(np.isnan(result.chisqr))
+            self.assertTrue(np.isnan(result.aic))
+            self.assertFalse(result.errorbars)
+            self.assertTrue(result.params['amplitude'].stderr is None)
+            self.assertTrue(abs(result.params['amplitude'].value - 20.0) < 0.001)
+        else:
+            pass
 
         # with omit, should get good results
         result = mod.fit(y, params, x=x, nan_policy='omit')
@@ -1225,8 +1378,6 @@ class TestUserDefiniedModel(CommonTests, unittest.TestCase):
         msg = 'The model function generated NaN values and the fit aborted!'
         self.assertRaisesRegex(ValueError, msg, result)
 
-    @pytest.mark.skipif(sys.version_info.major == 2,
-                        reason="cannot use wrapped functions with Python 2")
     def test_wrapped_model_func(self):
         x = np.linspace(-1, 1, 51)
         y = 2.0*x + 3 + 0.0003 * x*x
@@ -1246,6 +1397,21 @@ class TestUserDefiniedModel(CommonTests, unittest.TestCase):
 
         self.assertTrue(abs(result.params['a'].value - 2.0) < 0.05)
         self.assertTrue(abs(result.params['b'].value - 3.0) < 0.41)
+
+    def test_different_independent_vars_composite_modeld(self):
+        """Regression test for different independent variables in CompositeModel.
+
+        See: https://github.com/lmfit/lmfit-py/discussions/787
+
+        """
+        def two_independent_vars(y, z, a):
+            return a * y + z
+
+        BackgroundModel = Model(two_independent_vars,
+                                independent_vars=["y", "z"], prefix="yz_")
+        PeakModel = Model(gaussian, independent_vars=["x"], prefix="x_")
+        CompModel = BackgroundModel + PeakModel
+        assert CompModel.independent_vars == ['x', 'y', 'z']
 
 
 class TestLinear(CommonTests, unittest.TestCase):
@@ -1349,3 +1515,185 @@ class TestExpression(CommonTests, unittest.TestCase):
 
         data_components = comp_model.eval_components(x=x)
         self.assertIn('exp', data_components)
+
+
+def test_make_params_valuetypes():
+    mod = lmfit.models.SineModel()
+
+    pars = mod.make_params(amplitude=1, frequency=1, shift=-0.2)
+
+    pars = mod.make_params(amplitude={'value': 0.9, 'min': 0},
+                           frequency=1.03,
+                           shift={'value': -0.2, 'vary': False})
+
+    val_i32 = np.arange(10, dtype=np.int32)
+    val_i64 = np.arange(10, dtype=np.int64)
+    # np.longdouble equals to np.float128 on Linux and macOS, np.float64 on Windows
+    val_ld = np.arange(10, dtype=np.longdouble)/3.0
+    val_c128 = np.arange(10, dtype=np.complex128)/3.0
+
+    pars = mod.make_params(amplitude=val_i64[2],
+                           frequency=val_i32[3],
+                           shift=-val_ld[4])
+
+    pars = mod.make_params(amplitude=val_c128[2],
+                           frequency=val_i32[3],
+                           shift=-val_ld[4])
+
+    assert pars is not None
+    with pytest.raises(ValueError):
+        pars = mod.make_params(amplitude='a string', frequency=2, shift=7)
+
+    with pytest.raises(TypeError):
+        pars = mod.make_params(amplitude={'v': 3}, frequency=2, shift=7)
+
+    with pytest.raises(TypeError):
+        pars = mod.make_params(amplitude={}, frequency=2, shift=7)
+
+
+def test_complex_model_eval_uncertainty():
+    """Github #900"""
+    def cmplx(f, omega, areal, aimag, off, sigma):
+        return (areal*np.cos(f*omega + off) + 1j*aimag*np.sin(f*omega + off))*np.exp(-f/sigma)
+
+    f = np.linspace(0, 10, 501)
+    dat = cmplx(f, 4, 10, 5, 0.2, 4.5) + (0.1 + 0.2j)*np.random.normal(scale=0.25, size=len(f))
+    mod = Model(cmplx)
+    params = mod.make_params(omega=5, areal=5, aimag=5,
+                             off={'value': 0.5, 'min': -2, 'max': 2},
+                             sigma={'value': 3, 'min': 1.e-5, 'max': 1000})
+
+    result = mod.fit(dat, params=params, f=f)
+    dfit = result.eval_uncertainty()
+    assert len(dfit) == len(f)
+    assert dfit.dtype == 'complex128'
+
+
+def test_compositemodel_returning_list():
+    """Github #875"""
+    def lin1(x, k):
+        return [k*x1 for x1 in x]
+
+    def lin2(x, k):
+        return [k*x1 for x1 in x]
+
+    y = np.linspace(0, 100, 100)
+    x = np.linspace(0, 100, 100)
+
+    Model1 = Model(lin1, independent_vars=["x"], prefix="m1_")
+    Model2 = Model(lin2, independent_vars=["x"], prefix="m2_")
+    ModelSum = Model1 + Model2
+    pars = Parameters()
+    pars.add('m1_k', value=0.5)
+    pars.add('m2_k', value=0.5)
+    result = ModelSum.fit(y, pars, x=x)
+    assert len(result.best_fit) == len(x)
+
+
+def test_rsquared_with_weights():
+    """Github #921"""
+    def func(x, k=1, b=0):
+        return k*x+b
+
+    x = np.array([1, 2, 3, 4])
+    y = np.array([1.1, 1.9, 3.05, 3.95])
+    yerr = np.array([0.03, 0.04, 0.01, 0.02])
+
+    mod = Model(func)
+    params = mod.make_params()
+    result = mod.fit(y, params, x=x, weights=1.0/yerr)
+
+    assert result.rsquared < 1.00
+    assert result.rsquared > 0.95
+
+
+# based on Github #953
+class PolynomialFunction:
+    def __init__(self, degree=1):
+        self.degree = degree
+
+    @property
+    def __name__(self):
+        return self.__class__.__name__
+
+    @property
+    def argnames(self):
+        return ["x"] + [f"c{i}" for i in range(self.degree + 1)]
+
+    @property
+    def kwargs(self):
+        return {}
+
+    def __call__(self, x, *coeffs, **params):
+        if len(coeffs) != self.degree + 1:
+            coeffs = [params[f"c{d}"] for d in range(self.degree + 1)]
+        return np.polynomial.polynomial.polyval(x, coeffs)
+
+
+def test_custom_variadic_model():
+    """Github #953"""
+    model = Model(PolynomialFunction(degree=3))
+    params = model.make_params(c0=5, c1=3.6, c2=-0.2, c3=0)
+
+    assert 'x' in model.independent_vars
+
+    np.random.seed(0)
+    x1 = np.linspace(-10, 10, 201)
+    y1 = 5 + 3.3*x1 + 0.17*x1**2 - 0.004*x1**3
+    y1 += np.random.normal(size=201, scale=0.1)
+
+    result = model.fit(y1, params, x=x1)
+
+    assert result.chisqr < 15.0
+    assert result.nfev > 7
+    assert_allclose(result.values['c0'], 5.0, 0.02, 0.02, '', True)
+    assert_allclose(result.values['c1'], 3.3, 0.02, 0.02, '', True)
+
+
+def test_model_refitting():
+    """Github #960"""
+    np.random.seed(0)
+    x = np.linspace(0, 100, 5001)
+    y = gaussian(x, amplitude=90, center=60, sigma=4) + 30 + 0.3*x - 0.0030*x*x
+    y += np.random.normal(size=5001, scale=0.5)
+
+    model = GaussianModel(prefix='peak_') + QuadraticModel(prefix='bkg_')
+
+    params = model.make_params(bkg_a=0, bkg_b=0, bkg_c=20, peak_amplitude=200,
+                               peak_center=55, peak_sigma=10)
+
+    result = model.fit(y, params, x=x, method='powell')
+    assert result.chisqr > 12000.0
+    assert result.nfev > 500
+    assert result.params['peak_amplitude'].value > 500
+    assert result.params['peak_amplitude'].value < 5000
+    assert result.params['peak_sigma'].value > 10
+    assert result.params['peak_sigma'].value < 100
+
+    # now re-fit with LM
+    result.fit(y, x=x, method='leastsq')
+
+    assert result.nfev > 25
+    assert result.nfev < 200
+    assert result.chisqr < 2000.0
+
+    assert result.params['peak_amplitude'].value > 85
+    assert result.params['peak_amplitude'].value < 95
+    assert result.params['peak_sigma'].value > 3
+    assert result.params['peak_sigma'].value < 5
+
+    # and assert that the initial value are from the Powell result
+    assert result.init_values['peak_amplitude'] > 1500
+    assert result.init_values['peak_sigma'] > 25
+
+    params = model.make_params(bkg_a=0, bkg_b=-.02, bkg_c=26, peak_amplitude=20,
+                               peak_center=62, peak_sigma=3)
+
+    # now re-fit with LM and these new params
+    result.fit(y, params, x=x, method='leastsq')
+
+    # and assert that the initial value are from the Powell result
+    assert result.init_values['peak_amplitude'] > 19
+    assert result.init_values['peak_amplitude'] < 21
+    assert result.init_values['peak_sigma'] > 2
+    assert result.init_values['peak_sigma'] < 4

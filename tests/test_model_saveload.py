@@ -1,5 +1,6 @@
 """Tests for saving/loading Models and ModelResults."""
 
+import json
 import os
 import time
 
@@ -8,7 +9,6 @@ from numpy.testing import assert_allclose
 import pytest
 
 from lmfit import Parameters
-import lmfit.jsonutils
 from lmfit.lineshapes import gaussian, lorentzian
 from lmfit.model import (Model, ModelResult, load_model, load_modelresult,
                          save_model, save_modelresult)
@@ -20,6 +20,8 @@ y, x = np.loadtxt(os.path.join(os.path.dirname(__file__), '..',
 
 SAVE_MODEL = 'model_1.sav'
 SAVE_MODELRESULT = 'modelresult_1.sav'
+
+MODELRESULT_LMFIT_1_0 = 'gauss_modelresult_lmfit100.sav'
 
 
 def clear_savefile(fname):
@@ -66,34 +68,28 @@ def create_model_params(x, y):
 def check_fit_results(result):
     """Check the result of optimization."""
     assert result.nvarys == 8
-    assert_allclose(result.chisqr, 1247.528209)
-    assert_allclose(result.aic, 417.864631)
+    assert_allclose(result.chisqr, 1247.528209, rtol=1.0e-5)
+    assert_allclose(result.aic, 417.864631, rtol=1.0e-5)
 
     pars = result.params
-    assert_allclose(pars['exp_decay'], 90.950886)
-    assert_allclose(pars['exp_amplitude'], 99.018328)
+    assert_allclose(pars['exp_decay'], 90.950886, rtol=1.0e-5)
+    assert_allclose(pars['exp_amplitude'], 99.018328, rtol=1.0e-5)
 
-    assert_allclose(pars['g1_sigma'], 16.672575)
-    assert_allclose(pars['g1_center'], 107.030954)
-    assert_allclose(pars['g1_amplitude'], 4257.773192)
-    assert_allclose(pars['g1_fwhm'], 39.260914)
-    assert_allclose(pars['g1_height'], 101.880231)
+    assert_allclose(pars['g1_sigma'], 16.672575, rtol=1.0e-5)
+    assert_allclose(pars['g1_center'], 107.030954, rtol=1.0e-5)
+    assert_allclose(pars['g1_amplitude'], 4257.773192, rtol=1.0e-5)
+    assert_allclose(pars['g1_fwhm'], 39.260914, rtol=1.0e-5)
+    assert_allclose(pars['g1_height'], 101.880231, rtol=1.0e-5)
 
-    assert_allclose(pars['g2_sigma'], 13.806948)
-    assert_allclose(pars['g2_center'], 153.270101)
-    assert_allclose(pars['g2_amplitude'], 2493.417703)
-    assert_allclose(pars['g2_fwhm'], 32.512878)
-    assert_allclose(pars['g2_height'], 72.045593)
+    assert_allclose(pars['g2_sigma'], 13.806948, rtol=1.0e-5)
+    assert_allclose(pars['g2_center'], 153.270101, rtol=1.0e-5)
+    assert_allclose(pars['g2_amplitude'], 2493.417703, rtol=1.0e-5)
+    assert_allclose(pars['g2_fwhm'], 32.512878, rtol=1.0e-5)
+    assert_allclose(pars['g2_height'], 72.045593, rtol=1.0e-5)
 
 
-@pytest.mark.parametrize("dill", [False, True])
-def test_save_load_model(dill):
-    """Save/load Model with/without dill."""
-    if dill:
-        pytest.importorskip("dill")
-    else:
-        lmfit.jsonutils.HAS_DILL = False
-
+def test_save_load_model():
+    """Save/load Model, now always asserting that dill is available."""
     # create/save Model and perform some tests
     model, _pars = create_model_params(x, y)
     save_model(model, SAVE_MODEL)
@@ -125,14 +121,8 @@ def test_save_load_model(dill):
     clear_savefile(SAVE_MODEL)
 
 
-@pytest.mark.parametrize("dill", [False, True])
-def test_save_load_modelresult(dill):
-    """Save/load ModelResult with/without dill."""
-    if dill:
-        pytest.importorskip("dill")
-    else:
-        lmfit.jsonutils.HAS_DILL = False
-
+def test_save_load_modelresult():
+    """Save/load ModelResult now always asserting that dill is available."""
     # create model, perform fit, save ModelResult and perform some tests
     model, params = create_model_params(x, y)
     result = model.fit(y, params, x=x)
@@ -144,13 +134,21 @@ def test_save_load_modelresult(dill):
     text = ''
     with open(SAVE_MODELRESULT) as fh:
         text = fh.read()
-    assert 12000 < len(text) < 15000  # depending on whether dill is present
+    assert 12000 < len(text) < 60000
 
     # load the saved ModelResult from file and compare results
     result_saved = load_modelresult(SAVE_MODELRESULT)
+    assert result_saved.residual is not None
     check_fit_results(result_saved)
 
     clear_savefile(SAVE_MODEL)
+
+
+def test_load_legacy_modelresult():
+    """Load legacy ModelResult."""
+    fname = os.path.join(os.path.dirname(__file__), MODELRESULT_LMFIT_1_0)
+    result_saved = load_modelresult(fname)
+    assert result_saved is not None
 
 
 def test_saveload_modelresult_attributes():
@@ -219,6 +217,62 @@ def test_saveload_modelresult_roundtrip(method):
     assert_allclose(result3.params['b'], 0.22, rtol=1.0e-2)
 
 
+def test_saveload_modelresult_roundtrip_user_expr_function():
+    """Test for modelresult.loads()/dumps() for a model with user defined expr function."""
+
+    def mfunc(x, a, b):
+        return a * (x-b)
+
+    def expr_func(x):
+        return 3 * x
+
+    model = Model(mfunc)
+    params = Parameters(usersyms={"expr_func": expr_func})
+    params.add("a", min=.01, max=1)
+    params.add("b", min=.01, max=3.1)
+    params.add("c", expr="expr_func(a)")
+
+    np.random.seed(2020)
+    xx = np.linspace(-5, 5, 201)
+    yy = 0.5 * (xx - 0.22) + np.random.normal(scale=0.01, size=xx.size)
+
+    result1 = model.fit(yy, params=params, x=xx)
+
+    result2 = ModelResult(model, Parameters())
+    result2.loads(result1.dumps(), funcdefs={'mfunc': mfunc, 'expr_func': expr_func})
+
+    assert result1.userfcn == result2.userfcn
+    assert result1.params == result2.params
+    assert result1.init_params == result2.init_params
+    assert set(result1.params._asteval.symtable) == set(result2.params._asteval.symtable)
+
+
+def test_saveload_modelresult_eval_uncertainty():
+    """Test for ModelResult.loads() and eval_uncertainty
+    GH Issue #909
+
+    """
+    savefile = 'modres_x.txt'
+    x = np.linspace(-10, 10, 201)
+    amp, cen, wid = 3.4, 1.8, 0.5
+
+    y = amp * np.exp(-(x-cen)**2 / (2*wid**2)) / (np.sqrt(2*np.pi)*wid)
+    y += np.random.normal(size=x.size, scale=0.01)
+
+    gmod = GaussianModel()
+    result = gmod.fit(y, x=x, amplitude=5, center=2, sigma=1)
+    save_modelresult(result, savefile)
+    time.sleep(0.25)
+
+    result2 = load_modelresult(savefile)
+
+    dymod = result2.eval_uncertainty()
+
+    assert len(dymod) == len(x)
+    assert dymod.sum() > 0.
+    os.unlink(savefile)
+
+
 def test_saveload_modelresult_expression_model():
     """Test for ModelResult.loads()/dumps() for ExpressionModel.
 
@@ -240,6 +294,7 @@ def test_saveload_modelresult_expression_model():
     result2 = load_modelresult(savefile)
 
     assert result2 is not None
+    assert result2.residual is not None
     assert result2.init_fit is not None
     assert_allclose((result2.init_fit - result.init_fit).sum() + 1.00, 1.00,
                     rtol=1.0e-2)
@@ -272,6 +327,59 @@ def test_saveload_usersyms():
     time.sleep(0.25)
     result2 = load_modelresult(savefile)
 
+    assert result2.residual is not None
     assert_allclose(result2.params['sigma'], 1.075487, rtol=1.0e-5)
     assert_allclose(result2.params['center'], 8.489738, rtol=1.0e-5)
     assert_allclose(result2.params['height'], 0.557778, rtol=1.0e-5)
+
+
+def test_modelresult_summary():
+    """Test summary() method of ModelResult.
+    """
+    x = np.linspace(0, 20, 501)
+    y = gaussian(x, 1.1, 8.5, 2) + lorentzian(x, 1.7, 8.5, 1.5)
+    np.random.seed(20)
+    y = y + np.random.normal(size=len(x), scale=0.025)
+
+    model = VoigtModel()
+    pars = model.guess(y, x=x)
+    result = model.fit(y, pars, x=x)
+
+    summary = result.summary()
+
+    assert isinstance(summary, dict)
+
+    for attr in ('ndata', 'nvarys', 'nfree', 'chisqr', 'redchi', 'aic',
+                 'bic', 'rsquared', 'nfev', 'max_nfev', 'aborted',
+                 'errorbars', 'success', 'message', 'lmdif_message', 'ier',
+                 'nan_policy', 'scale_covar', 'calc_covar', 'ci_out',
+                 'col_deriv', 'flatchain', 'call_kws', 'var_names',
+                 'user_options', 'kws', 'init_values', 'best_values'):
+        val = summary.get(attr, '__INVALID__')
+        assert val != '__INVALID__'
+
+    assert len(json.dumps(summary)) > 100
+
+
+def test_load_model_versions():
+    """test multiple loading saved models from different
+    python and lmfit versions:
+
+    note that providing the model function is important - these
+    cannot be transferred between Python versions
+    """
+    def local_sine(x, amp, freq, shift):
+        return amp * np.sin(x*freq + shift)
+
+    x = np.linspace(0, 10, 101)
+
+    for fname in ('sinemodel_py310_lm122.sav',
+                  'sinemodel_py311_lm122.sav',
+                  'sinemodel_py312_lm122.sav'):
+        fpath = os.path.join(os.path.dirname(__file__), 'saved_models', fname)
+
+        mod = load_model(fpath, funcdefs={'mysine': local_sine})
+        pars = mod.make_params(amp=2, freq=0.8, shift=0.200)
+        y = mod.eval(pars, x=x)
+        assert y.max() > 1.55
+        assert y.min() < -1.55

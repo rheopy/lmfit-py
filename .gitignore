@@ -7,6 +7,7 @@ examples/documentation
 doc/*.pdf
 doc/*.dat
 doc/*.csv
+doc/sg_execution_times.rst
 doc/extensions.py
 build
 dist
@@ -18,7 +19,10 @@ sandbox/
 .ipynb_checkpoints/
 .vscode/
 doc/html
-*.sav
+doc/*.sav
+parameters.sav
+tmpvoigt_modelresult.sav
+examples/*.sav
 .pytest*
 *.coverage*
 *htmlcov/*

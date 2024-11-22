@@ -1,10 +1,12 @@
 """Tests of ModelResult.eval_uncertainty()"""
+import os
 
 import numpy as np
 from numpy.testing import assert_allclose
 
 from lmfit.lineshapes import gaussian
-from lmfit.models import GaussianModel, LinearModel
+from lmfit.model import Model
+from lmfit.models import ExponentialModel, GaussianModel, LinearModel
 
 
 def get_linearmodel(slope=0.8, intercept=0.5, noise=1.5):
@@ -93,3 +95,56 @@ def test_gauss_noiselevel():
     dely_hinoise = ret2.eval_uncertainty(sigma=1)
 
     assert_allclose(dely_hinoise.mean(), 10*dely_lonoise.mean(), rtol=1.e-2)
+
+
+def test_component_uncertainties():
+    "test dely_comps"
+    y, x = np.loadtxt(os.path.join(os.path.dirname(__file__), '..',
+                                   'examples', 'NIST_Gauss2.dat')).T
+    model = (GaussianModel(prefix='g1_') +
+             GaussianModel(prefix='g2_') +
+             ExponentialModel(prefix='bkg_'))
+
+    params = model.make_params(bkg_amplitude=100, bkg_decay=80,
+                               g1_amplitude=3000,
+                               g1_center=100,
+                               g1_sigma=10,
+                               g2_amplitude=3000,
+                               g2_center=150,
+                               g2_sigma=10)
+
+    result = model.fit(y, params, x=x)
+    comps = result.eval_components(x=x)
+    dely = result.eval_uncertainty(sigma=3)
+
+    assert 'g1_' in comps
+    assert 'g2_' in comps
+    assert 'bkg_' in comps
+    assert dely.mean() > 0.8
+    assert dely.mean() < 2.0
+    assert result.dely_comps['g1_'].mean() > 0.5
+    assert result.dely_comps['g1_'].mean() < 1.5
+    assert result.dely_comps['g2_'].mean() > 0.5
+    assert result.dely_comps['g2_'].mean() < 1.5
+    assert result.dely_comps['bkg_'].mean() > 0.5
+    assert result.dely_comps['bkg_'].mean() < 1.5
+
+
+def test_scalar_independent_vars():
+    """Github #951"""
+    mr = LinearModel().fit(data=[1, 2, 4], x=[1, 2, 3])
+
+    assert_allclose(mr.eval_uncertainty(x=1.2), np.array([0.60629034]))
+    assert_allclose(mr.eval_uncertainty(x=np.array(1.2j)), np.array([1.15903153+0.17475665j]))
+
+
+def test_multidim_model():
+    """test models that return a multi-dimension output"""
+    def fit(x, p=2):
+        return np.array([x, p*x])
+    model = Model(fit)
+
+    mr = model.fit(data=np.array([[1, 2, 3], [2, 3, 5]]), x=np.array([1, 2, 3]))
+
+    assert_allclose(mr.eval_uncertainty(x=np.array([3, 4])), np.array([[0, 0], [0.18432744, 0.24576991]]))
+    assert_allclose(mr.eval_uncertainty(x=np.array([3j, 4j])), np.array([[0, 0], [0.13033918+0.13033918j, 0.17378557+0.17378557j]]))
